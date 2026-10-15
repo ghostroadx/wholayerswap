@@ -1,0 +1,8 @@
+## Interface: 16001, 120100
+## Title: WhoLayerSwap
+## Notes: Layer swap between <who>, <quien> and <quem>: one-click leave-and-request buttons, auto-invites over a hidden channel, auto-accept.
+## Author: Ryan
+## Version: 1.8.0
+## SavedVariables: WhoLayerSwapDB
+
+WhoLayerSwap.lua
