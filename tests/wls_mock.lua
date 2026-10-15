@@ -24,7 +24,7 @@ end
 
 -- widgets
 local W = {}
-local FIELDS = { charter = 1, icon = 1, tex = 1, hint = 1, edits = 1, checks = 1, move = 1, gear = 1, get = 1, set = 1, Text = 1, checked = 1, ag = 1, kids = 1, playing = 1, inviting = 1, invite = 1, plan = 1, attrs = 1, secure = 1, scripts = 1, txt = 1, shown = 1, enabled = 1, text = 1, buttons = 1, t = 1, lang = 1, label = 1, accepted = 1, alpha = 1, points = 1 }
+local FIELDS = { hasSecure = 1, rows = 1, count = 1, empty = 1, more = 1, title = 1, slot = 1, queue = 1, itemID = 1, fname = 1, charter = 1, icon = 1, tex = 1, hint = 1, edits = 1, checks = 1, move = 1, gear = 1, get = 1, set = 1, Text = 1, checked = 1, ag = 1, kids = 1, playing = 1, inviting = 1, invite = 1, plan = 1, attrs = 1, secure = 1, scripts = 1, txt = 1, shown = 1, enabled = 1, text = 1, buttons = 1, t = 1, lang = 1, label = 1, accepted = 1, alpha = 1, points = 1 }
 W.__index = function(t, k) if FIELDS[k] then return nil end return W[k] or function() end end
 function W:SetScript(n, fn) local s = rawget(self, "scripts") or {}; rawset(self, "scripts", s); s[n] = fn end
 function W:CreateTexture() return setmetatable({}, W) end
@@ -165,7 +165,7 @@ C_GuildInfo.Invite = function(n)
 end
 ACCEPT_BLOCKED = false
 AcceptGuild = function()
-    if ACCEPT_BLOCKED then log("BLOCKED AcceptGuild"); FRAMES[1].scripts.OnEvent(FRAMES[1], "ADDON_ACTION_BLOCKED", "WhoLayerSwap", "AcceptGuild()"); return end
+    if ACCEPT_BLOCKED then log("BLOCKED AcceptGuild"); EV("ADDON_ACTION_BLOCKED", "WhoLayerSwap", "AcceptGuild()"); return end
     log("ACCEPT")
 end
 function RUN_MACRO(text)
@@ -224,3 +224,60 @@ C_Container = {
 ITEM_NAMES = { [5863] = "Guild Charter" }
 C_Item = { GetItemNameByID = function(id) return ITEM_NAMES[id] end }
 function W:SetTexture(t) rawset(self, "tex", t) end
+OVERRIDES = {}   -- key -> button name
+function SetOverrideBindingClick(owner, prio, key, btn, mouse)
+    if INCOMBAT then error("ADDON_ACTION_BLOCKED SetOverrideBindingClick in combat") end
+    OVERRIDES[key] = btn
+end
+function ClearOverrideBindings(owner)
+    if INCOMBAT then error("ADDON_ACTION_BLOCKED ClearOverrideBindings in combat") end
+    for k, v in pairs(OVERRIDES) do if v == owner:GetName() then OVERRIDES[k] = nil end end
+end
+function W:GetName() return rawget(self, "fname") end
+local _CF = CreateFrame
+function CreateFrame(kind, name, parent, template) local w = _CF(kind, name, parent, template); if name then rawset(w, "fname", name) end; return w end
+PetitionFrame = setmetatable({}, W)
+TARGET = nil          -- { name = "Bob-Dreamscythe", player = true, me = false }
+UnitExists = function(u) return u == "target" and TARGET ~= nil or u == "player" end
+UnitIsPlayer = function(u) return u == "target" and TARGET ~= nil and TARGET.player ~= false end
+UnitIsUnit = function(a, b) return a == "target" and b == "player" and TARGET ~= nil and TARGET.me == true end
+GetUnitName = function(u, realm) if u == "target" and TARGET then return TARGET.name end end
+SIGNED = {}
+GetNumPetitionNames = function() return #SIGNED end
+GetPetitionNameInfo = function(i) return SIGNED[i] end
+-- Combat protection: secure buttons and frames holding them can't be shown, hidden,
+-- moved or resized in combat (the real client blocks it).
+local function guarded(self) return rawget(self, "secure") or rawget(self, "hasSecure") end
+local function protect(name)
+    local orig = W[name]
+    W[name] = function(self, ...)
+        if INCOMBAT and guarded(self) then error("ADDON_ACTION_BLOCKED " .. name .. " on protected frame in combat") end
+        return orig(self, ...)
+    end
+end
+for _, n in ipairs({ "Show", "Hide", "SetShown", "SetPoint", "ClearAllPoints", "SetHeight", "SetSize" }) do
+    W[n] = W[n] or function() end
+    protect(n)
+end
+local _CF2 = CreateFrame
+function CreateFrame(kind, name, parent, template)
+    local w = _CF2(kind, name, parent, template)
+    if template and template:find("SecureActionButtonTemplate") and type(parent) == "table" then rawset(parent, "hasSecure", true) end
+    return w
+end
+-- ADVANCE also runs OnUpdate scripts (frames are visible unless hidden, like WoW), in 0.25s steps.
+local _ADV = ADVANCE
+function ADVANCE(sec)
+    local left = sec
+    while left > 1e-9 do
+        local step = math.min(0.25, left)
+        _ADV(step)
+        for _, fr in ipairs(FRAMES) do
+            local sc = rawget(fr, "scripts")
+            if sc and sc.OnUpdate and rawget(fr, "shown") ~= false and fr ~= rawget(_G, "WhoLayerSwapToast") then
+                sc.OnUpdate(fr, step)
+            end
+        end
+        left = left - step
+    end
+end

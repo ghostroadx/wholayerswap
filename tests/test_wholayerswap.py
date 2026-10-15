@@ -14,7 +14,7 @@ def fresh(setup="", login=True):
     L.execute(setup)
     L.execute("return (loadstring or load)(...)", ADDON)("WhoLayerSwap")
     L.execute("""
-      FRAME = FRAMES[1]
+      for _, fr in ipairs(FRAMES) do if fr.scripts and fr.scripts.OnEvent then FRAME = fr break end end
       function EV(...) FRAME.scripts.OnEvent(FRAME, ...) end
       function REQ(lang, sender, chname, localId) EV("CHAT_MSG_ADDON","WHOLAYERSWAP","REQ:"..lang,"CHANNEL",sender,"",0,localId or 5,chname or "%s") end
       function TYPED(text, sender, base, idx) base = base or "%s"; idx = idx or 5; EV("CHAT_MSG_CHANNEL", text, sender, "", idx .. ". " .. base, "", "", 0, idx, base) end
@@ -22,8 +22,11 @@ def fresh(setup="", login=True):
       function SLASH(s) SlashCmdList.WHOLAYERSWAP(s) end
       function BTN(i) CLICK(WhoLayerSwapPanel.buttons[i]) end
       function CLEAR() LOG = {}; OUT = {} end
-      function INVBTN() return _G.WhoLayerSwapInviteButton end
-      function CLICKALL() local b = INVBTN() local n = 0 while b and b.shown and n < 500 do CLICK(b) n = n + 1 end end
+      function ROW(i) return _G["WhoLayerSwapQueueInvite" .. i] end
+      function ROWNAME(i) return WhoLayerSwapQueue.rows[i].name.txt end
+      function INVBTN() for i = 1, 8 do local b = ROW(i) if b and b.shown then return b end end end
+      function CLICKALL() local n = 0 local b = INVBTN() while b and n < 500 do CLICK(b) n = n + 1 b = INVBTN() end end
+      function SHOWN_NAMES() local r = {} for i = 1, 8 do if ROW(i).shown then r[#r+1] = i .. ":" .. ROWNAME(i) end end return table.concat(r, ",") end
       function invites() local r = {} for _, l in ipairs(LOG) do local n = l:match("^INVITE (.+)") if n then r[#r+1] = n end end return #r, table.concat(r, ",") end
       function has(prefix) for _, l in ipairs(LOG) do if l:sub(1, #prefix) == prefix then return true end end return false end
       function said(sub) for _, l in ipairs(OUT) do if l:find(sub, 1, true) then return true end end return false end
@@ -145,37 +148,59 @@ scenario("invite uses /ginvite with spaced Forever name", None, 'REQ("english","
 scenario("my own phrase (same GUID) -> never queued", 'ME="Rot Howler"', 'EV("CHAT_MSG_CHANNEL","LayerSwap English","Rot Howler-Dreamscythe","","5. whoguildlayerswapchannel","","",0,5,"whoguildlayerswapchannel",0,1,MYGUID)', 0, 'return not has("SOUND")')
 scenario("my own phrase, name w/ space, no GUID -> never queued", 'ME="Rot Howler"', 'TYPED("LayerSwap English","Rot Howler-Dreamscythe")', 0)
 scenario("my own backup REQ with my GUID -> never queued", 'ME="Rot Howler"', 'EV("CHAT_MSG_ADDON","WHOLAYERSWAP","REQ:english:"..MYGUID,"CHANNEL","RotHowler","",0,5,"whoguildlayerswapchannel")', 0)
-scenario("request plays a sound and tells me to click", None, 'REQ("english","Bob-Dreamscythe")', 1, 'return has("SOUND") and said("Invite Bob")')
+scenario("request plays a ping, no chat spam", None, 'REQ("english","Bob-Dreamscythe")', 1, 'return has("SOUND") and not said("wants into your guild")')
 
-L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") REQ("english","Cat-Dreamscythe") ADVANCE(1)')
-ib = L.globals().WhoLayerSwapInviteButton
-check("invite button shows first + count", ib.shown and ib.txt == "Invite Bob (+1)", f"{ib.shown} {ib.txt}")
-L.execute('CLICK(INVBTN())')
-check("after one click, next person shown", ib.txt == "Invite Cat" and L.execute('return has("INVITE Bob-Dreamscythe")'), ib.txt)
-L.execute('CLICK(INVBTN(), "RightButton")')
-check("right-click skips, button hides when empty", not ib.shown and not L.execute('return has("INVITE Cat")'), dump(L))
-L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") ADVANCE(135)')
-check("request expires off the button after 2 min", not L.globals().WhoLayerSwapInviteButton.shown)
-L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") CLAIM("bob-dreamscythe")')
-check("someone else's claim hides my button", not L.globals().WhoLayerSwapInviteButton.shown)
+# ------------------------------------------------------------- invite queue list
+L = fresh(); g = L.globals(); q = g.WhoLayerSwapQueue
+check("queue hidden while empty", q is not None and not q.shown)
+L.execute('CLEAR() REQ("english","Bob-Dreamscythe") REQ("english","Cat-Dreamscythe") ADVANCE(1)')
+check("queue shows each person on a row", q.shown and L.execute('return SHOWN_NAMES()') == "1:Bob,2:Cat", L.execute('return SHOWN_NAMES()'))
+check("count shows 2", q.count.txt == "2")
+check("countdown shows seconds left", q.rows[1].time.txt == "19s", q.rows[1].time.txt)
+L.execute('CLICK(ROW(1))')
+check("invite on row 1 invites Bob, his row disappears", L.execute('return has("INVITE Bob-Dreamscythe")') and L.execute('return SHOWN_NAMES()') == "2:Cat", L.execute('return SHOWN_NAMES()'))
+L.execute('REQ("english","Dan-Dreamscythe")')
+check("newcomer takes the free slot (no shifting)", L.execute('return SHOWN_NAMES()') == "1:Dan,2:Cat", L.execute('return SHOWN_NAMES()'))
+L.execute('CLEAR() CLICK(ROW(2), "RightButton")')
+check("right-click skips Cat without inviting", not L.execute('return has("INVITE")') and L.execute('return SHOWN_NAMES()') == "1:Dan", L.execute('return SHOWN_NAMES()'))
+L.execute('ADVANCE(21)')
+check("after 20 seconds the row disappears, queue hides", L.execute('return SHOWN_NAMES()') == "" and not q.shown, L.execute('return SHOWN_NAMES()'))
+L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") ADVANCE(19)')
+check("still there at 19 seconds", L.execute('return SHOWN_NAMES()') == "1:Bob")
+L.execute('REQ("english","Bob-Dreamscythe") ADVANCE(10)')
+check("asking again restarts their 20 seconds", L.execute('return SHOWN_NAMES()') == "1:Bob")
+L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") REQ("english","Cat-Dreamscythe") CLAIM("bob-dreamscythe")')
+check("someone else invited Bob -> only his row goes", L.execute('return SHOWN_NAMES()') == "2:Cat", L.execute('return SHOWN_NAMES()'))
 L = fresh(); L.execute('CLEAR() INCOMBAT=true REQ("english","Bob-Dreamscythe")')
-check("request in combat: button waits (no secure change in combat)", not L.globals().WhoLayerSwapInviteButton.shown)
+check("request in combat: queue waits (secure rows)", not L.globals().WhoLayerSwapQueue.shown)
 L.execute('INCOMBAT=false EV("PLAYER_REGEN_ENABLED")')
-check("...shows after combat", L.globals().WhoLayerSwapInviteButton.shown)
+check("...appears after combat", L.globals().WhoLayerSwapQueue.shown and L.execute('return SHOWN_NAMES()') == "1:Bob")
+L = fresh(); L.execute('REQ("english","Bob-Dreamscythe") INCOMBAT=true CLEAR() CLICK(ROW(1))')
+check("clicking invite in combat does nothing, explains", not L.execute('return has("INVITE")') and L.execute('return said("in combat")'), dump(L))
 L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") REQ("english","Bob-Dreamscythe") TYPED("LayerSwap English","Bob-Dreamscythe")')
-check("same person 3x -> one queue entry", L.globals().WhoLayerSwapInviteButton.txt == "Invite Bob", L.globals().WhoLayerSwapInviteButton.txt)
+check("same person 3x -> one row", L.execute('return SHOWN_NAMES()') == "1:Bob")
+L = fresh(); L.execute('CLEAR() for i=1,20 do REQ("english","P"..i.."-Dreamscythe") end')
+q = L.globals().WhoLayerSwapQueue
+check("20 people at once: 8 rows + '+12 more waiting'", L.execute('return SHOWN_NAMES()').count(":") == 8 and q.more.txt == "+12 more waiting" and q.count.txt == "20", f"{q.more.txt} {q.count.txt}")
+check("20 people -> only one ping", L.execute('local n = 0 for _, l in ipairs(LOG) do if l:find("^SOUND") then n = n + 1 end end return n') == 1)
+L.execute('CLICK(ROW(3))')
+check("inviting one seats the next waiting person in that row", L.execute('return ROWNAME(3)') == "P9" and q.more.txt == "+11 more waiting", f"{L.execute('return ROWNAME(3)')} {q.more.txt}")
+L.execute('ADVANCE(21)')
+check("all 20 expire after 20s (no one invited)", not q.shown and L.execute('return SHOWN_NAMES()') == "")
+L = fresh('WhoLayerSwapDB={noPing=true}'); L.execute('CLEAR() REQ("english","Bob-Dreamscythe")')
+check("ping can be turned off", not L.execute('return has("SOUND")'))
+L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe") ADVANCE(9) REQ("english","Cat-Dreamscythe")')
+check("second ping only after 8+ seconds", L.execute('local n = 0 for _, l in ipairs(LOG) do if l:find("^SOUND") then n = n + 1 end end return n') == 2)
+L = fresh(); L.execute('CLEAR() EV("CHAT_MSG_WHISPER","ginv","Zed-Dreamscythe")')
+check("ginv whisper lands in the queue too", L.execute('return SHOWN_NAMES()') == "1:Zed")
 
 scenario("REQ with junk instead of GUID -> ignored", None, 'EV("CHAT_MSG_ADDON","WHOLAYERSWAP","REQ:english:<script>","CHANNEL","Bob-Dreamscythe","",0,5,"whoguildlayerswapchannel")', 0)
 scenario("REQ with someone's GUID -> invite", None, 'EV("CHAT_MSG_ADDON","WHOLAYERSWAP","REQ:english:Player-1-0000BOB","CHANNEL","Bob-Dreamscythe","",0,5,"whoguildlayerswapchannel")', 1)
 
 L = fresh(); L.execute('CLEAR() REQ("english","Bob-Dreamscythe")')
-ib = L.globals().WhoLayerSwapInviteButton
 check("request plays the map ping sound", L.execute('return has("SOUND 3175")'), dump(L))
-check("invite button centered on screen", ib.points[1] == "CENTER" and ib.points[3] == "CENTER" and ib.points[5] == 140, str(list(ib.points.values())))
-glow = [k for k in ib.kids.values() if k.ag is not None]
-check("glow texture pulses while shown", len(glow) == 1 and glow[0].ag.playing is True)
-L.execute('CLICKALL()')
-check("glow stops when button hides", not ib.shown and glow[0].ag.playing is False)
+q = L.globals().WhoLayerSwapQueue
+check("queue sits under the Layer swap panel by default", q.points[1] == "TOPRIGHT" and q.points[3] == "BOTTOMRIGHT", str(list(q.points.values())))
 
 # ------------------------------------------------------------- swap buttons
 def swap(desc, setup, button, expect_left, expect_req, extra=None):
@@ -402,46 +427,38 @@ check("claim on some other channel is ignored", L.execute('return (invites())') 
 L = fresh('LOCKDOWN=true'); L.execute('EV("CHAT_MSG_ADDON","WHOLAYERSWAP","CLAIM:bob-dreamscythe","CHANNEL","Ann-Dreamscythe","",0,5,"whoguildlayerswapchannel") LOCKDOWN=false CLEAR() REQ("english","Bob-Dreamscythe") ADVANCE(2) CLICKALL()')
 check("claims still recorded during chat lockdown", L.execute('return (invites())') == 0)
 
-# ------------------------------------------------------------- settings: invite button position
-L = fresh(); g = L.globals(); inv = g.WhoLayerSwapInviteButton
-check("invite button starts at default spot", list(inv.points.values())[:1] == ["CENTER"] and inv.points[5] == 140, str(list(inv.points.values())))
+# ------------------------------------------------------------- settings: invite queue position
+L = fresh(); g = L.globals(); q = g.WhoLayerSwapQueue
 L.execute('SLASH("settings") local m = WhoLayerSwapSettings.move m.scripts.OnClick(m)')
-mv = g.WhoLayerSwapInviteMover
-check("Move button shows the draggable stand-in", mv is not None and mv.shown and g.WhoLayerSwapSettings.move.txt == "Done moving")
-L.execute('local m = WhoLayerSwapInviteMover m.scripts.OnDragStart(m) m.scripts.OnDragStop(m)')
-check("drop saves the position", list(g.WhoLayerSwapDB.invitePoint.values()) == ["TOPRIGHT","TOPRIGHT",-100,-50], str(list(g.WhoLayerSwapDB.invitePoint.values())))
-check("real invite button follows", inv.points[1] == "TOPRIGHT" and inv.points[4] == -100 and inv.points[5] == -50, str(list(inv.points.values())))
-L.execute('local m = WhoLayerSwapInviteMover m.scripts.OnMouseUp(m, "RightButton")')
-check("right-click ends move mode", not mv.shown and g.WhoLayerSwapSettings.move.txt == "Move invite button")
+check("Move invite queue shows the empty queue to drag", q.shown and q.empty.shown and g.WhoLayerSwapSettings.move.txt == "Done moving")
+L.execute('local f = WhoLayerSwapQueue f.scripts.OnDragStart(f) f.scripts.OnDragStop(f)')
+check("dragging saves the position", list(g.WhoLayerSwapDB.queuePoint.values()) == ["TOPRIGHT","TOPRIGHT",-100,-50], str(list(g.WhoLayerSwapDB.queuePoint.values())))
+L.execute('local m = WhoLayerSwapSettings.move m.scripts.OnClick(m)')
+check("Done moving hides the empty queue", not q.shown and g.WhoLayerSwapSettings.move.txt == "Move invite queue")
 L.execute('CLEAR() REQ("english","Bob-Dreamscythe") ADVANCE(2) CLICKALL()')
-check("moved invite button still invites", L.execute('return (invites())') == 1, dump(L))
+check("moved queue still invites", L.execute('return (invites())') == 1, dump(L))
 L.execute('local m = WhoLayerSwapSettings.move m.scripts.OnClick(m) WhoLayerSwapSettings:Hide()')
-check("closing settings ends move mode", not mv.shown)
+check("closing settings ends move mode", not q.shown)
 L.execute('CLEAR() INCOMBAT=true local m = WhoLayerSwapSettings.move m.scripts.OnClick(m)')
-check("move mode refused in combat", not mv.shown and L.execute('return said("in combat")'))
-L = fresh(); g = L.globals(); inv = g.WhoLayerSwapInviteButton
-L.execute('SLASH("moveinvite") INCOMBAT=true CLEAR() local m = WhoLayerSwapInviteMover m.scripts.OnDragStop(m)')
-check("drop during combat: secure button not touched", inv.points[1] == "CENTER" and L.execute('return said("after combat")'), str(list(inv.points.values())))
-L.execute('INCOMBAT=false EV("PLAYER_REGEN_ENABLED")')
-check("...moves once combat ends", inv.points[1] == "TOPRIGHT")
-L.execute('CLEAR() SLASH("settings") ')
-L.execute('WhoLayerSwapDB.invitePoint = {"TOPRIGHT","TOPRIGHT",-100,-50}')
-L.execute('CLEAR()')
-# reset via button: find it by text among frames
-L.execute('for _, fr in ipairs(FRAMES) do if fr.txt == "Reset position" then fr.scripts.OnClick(fr) end end')
-check("Reset position -> back to centre", g.WhoLayerSwapDB.invitePoint is None and inv.points[1] == "CENTER" and inv.points[5] == 140, str(list(inv.points.values())))
-L = fresh('WhoLayerSwapDB={invitePoint={"BOTTOM","BOTTOM",10,200}}')
-inv = L.globals().WhoLayerSwapInviteButton
-check("saved invite position applied at login", inv.points[1] == "BOTTOM" and inv.points[5] == 200, str(list(inv.points.values())))
+check("move mode refused in combat", not q.shown and L.execute('return said("in combat")'))
+L = fresh(); g = L.globals(); q = g.WhoLayerSwapQueue
+L.execute('INCOMBAT=true local f = WhoLayerSwapQueue f.scripts.OnDragStart(f)')
+check("can't start dragging in combat", True)
+L = fresh('WhoLayerSwapDB={queuePoint={"BOTTOM","BOTTOM",10,200}}'); q = L.globals().WhoLayerSwapQueue
+check("saved queue position applied at login", q.points[1] == "BOTTOM" and q.points[5] == 200, str(list(q.points.values())))
+L.execute('for _, fr in ipairs(FRAMES) do if fr.txt == "Reset position" then end end SLASH("settings") for _, fr in ipairs(FRAMES) do if fr.txt == "Reset position" then fr.scripts.OnClick(fr) end end')
+check("Reset position -> back under the panel", L.globals().WhoLayerSwapDB.queuePoint is None and q.points[1] == "TOPRIGHT" and q.points[3] == "BOTTOMRIGHT", str(list(q.points.values())))
 for bad in ['"x"', '{1,2,3,4}', '{"TOP","TOP","a",5}', '{"TOP"}']:
     try:
-        L = fresh(f'WhoLayerSwapDB={{invitePoint={bad}}}'); inv = L.globals().WhoLayerSwapInviteButton
-        check(f"bad saved invite position {bad} -> default", inv.points[1] == "CENTER")
-    except Exception as e: check(f"bad saved invite position {bad} -> default", False, str(e)[:150])
+        L = fresh(f'WhoLayerSwapDB={{queuePoint={bad}}}'); q = L.globals().WhoLayerSwapQueue
+        check(f"bad saved queue position {bad} -> default", q.points[1] == "TOPRIGHT")
+    except Exception as e: check(f"bad saved queue position {bad} -> default", False, str(e)[:150])
+L = fresh('WhoLayerSwapDB={invitePoint={"BOTTOM","BOTTOM",10,200}}')
+check("old invite-button position from 1.8 is ignored safely", L.globals().WhoLayerSwapQueue.points[1] == "TOPRIGHT")
 
 # ------------------------------------------------------------- settings: checkboxes
 L = fresh('GUILD=nil'); L.execute('SLASH("settings")'); g = L.globals(); cb = g.WhoLayerSwapSettings.checks
-check("checkboxes reflect state", [cb[i].checked for i in (1,2,3,4,5)] == [True, False, False, True, False], str([cb[i].checked for i in (1,2,3,4,5)]))
+check("checkboxes reflect state", [cb[i].checked for i in (1,2,3,4,5,6,7)] == [True, False, False, True, True, False, True], str([cb[i].checked for i in (1,2,3,4,5,6,7)]))
 def toggle(i): L.execute(f'local c = WhoLayerSwapSettings.checks[{i}] c:SetChecked(not c:GetChecked()) c.scripts.OnClick(c)')
 toggle(1)
 L.execute('CLEAR() EV("GUILD_INVITE_REQUEST","M","Who",0,"",false)')
@@ -450,7 +467,8 @@ toggle(2); check("ticking 'show channel' puts it in chat", g.WhoLayerSwapDB.show
 toggle(2); check("unticking it takes it out again", g.WhoLayerSwapDB.showChannel is None and len(list(g.DEFAULT_CHAT_FRAME.channelList.values())) == 0)
 toggle(3); check("ticking lock saves it", g.WhoLayerSwapDB.locked is True)
 toggle(4); check("unticking charter button saves it", g.WhoLayerSwapDB.hideCharter is True)
-toggle(5); check("ticking debug turns it on", L.execute('SLASH("") return true'))
+toggle(6); check("ticking debug turns it on", L.execute('SLASH("") return true'))
+toggle(7); check("unticking ping saves it", g.WhoLayerSwapDB.noPing is True)
 L = fresh('GUILD=nil WhoLayerSwapDB={autoAccept=false}')
 L.execute('CLEAR() EV("GUILD_INVITE_REQUEST","M","Who",0,"",false)')
 check("auto-accept off survives a relog", not L.execute('return has("ACCEPT")'))
@@ -468,16 +486,22 @@ L.execute(CHARTER + ' EV("BAG_UPDATE_DELAYED")')
 check("charter appears in bags -> button shows", ch.shown and ch.attrs["macrotext"] == "/use item:5863" and ch.icon.tex == 134939, str(ch.attrs["macrotext"]))
 L.execute('CLEAR() CLICK(WhoLayerSwapCharterButton)')
 check("clicking runs /use item:5863 (secure macro)", L.execute('return has("MACRO /use item:5863")') and not L.execute('return has("BLOCKED")'), dump(L))
-check("button sits under the Layer swap panel", ch.points[1] == "TOP" and ch.points[3] == "BOTTOM")
+check("button is big and centered", ch.points[1] == "CENTER" and ch.points[3] == "CENTER" and ch.points[5] == 60)
+glow = [k for k in ch.kids.values() if k.ag is not None]
+check("charter button glows while shown", len(glow) == 1 and glow[0].ag.playing is True)
+check("F1 bound to the charter button while carrying one", L.globals().OVERRIDES["F1"] == "WhoLayerSwapCharterButton")
+check("hint mentions F1", "F1" in (ch.hint.txt or ""), str(ch.hint.txt))
 L.execute('BAGS[2][7] = nil EV("BAG_UPDATE_DELAYED")')
 check("charter turned in -> button hides, macro cleared", not ch.shown and ch.attrs["macrotext"] == "")
+check("...and F1 goes back to normal", L.globals().OVERRIDES["F1"] is None)
+check("...glow stops", glow[0].ag.playing is False)
 L = fresh(CHARTER); ch = L.globals().WhoLayerSwapCharterButton
 check("charter already in bags at login -> button shows", ch.shown)
 L = fresh(); ch = L.globals().WhoLayerSwapCharterButton
 L.execute('INCOMBAT=true ' + CHARTER + ' EV("BAG_UPDATE_DELAYED")')
-check("charter gained in combat -> button waits (secure)", not ch.shown)
+check("charter gained in combat -> button and F1 wait (secure, no error)", not ch.shown and L.globals().OVERRIDES["F1"] is None)
 L.execute('INCOMBAT=false EV("PLAYER_REGEN_ENABLED")')
-check("...shows after combat", ch.shown)
+check("...both arrive after combat", ch.shown and L.globals().OVERRIDES["F1"] == "WhoLayerSwapCharterButton")
 L = fresh('BAGS[0][3] = { itemID = 99999, itemName = "Guild Charter", iconFileID = 1 }'); ch = L.globals().WhoLayerSwapCharterButton
 check("different item ID but named Guild Charter -> found, uses its own ID", ch.shown and ch.attrs["macrotext"] == "/use item:99999", str(ch.attrs["macrotext"]))
 L = fresh('ITEM_NAMES[5863]="Carta de Hermandad" BAGS[1][1] = { itemID = 88888, itemName = "Carta de Hermandad", iconFileID = 1 }'); ch = L.globals().WhoLayerSwapCharterButton
@@ -492,6 +516,73 @@ L = fresh('BAGS[3] = nil BAGS[2][1] = { itemID = 5863 }'); ch = L.globals().WhoL
 check("missing bag + item without name -> no error, found by ID", ch.shown)
 L = fresh('C_Container = nil'); ch = L.globals().WhoLayerSwapCharterButton
 check("no container API -> no error, no button", not ch.shown)
+
+
+# F1 per character
+L = fresh(CHARTER); g = L.globals()
+L.execute('CLEAR() SLASH("charterkey")')
+check("/wls charterkey turns F1 off for this character", g.OVERRIDES["F1"] is None and g.WhoLayerSwapDB.charterKeyOff[g.MYGUID] is True and L.execute('return said("off for this character")'), dump(L))
+check("button still shows with F1 off, hint drops F1", g.WhoLayerSwapCharterButton.shown and "F1" not in g.WhoLayerSwapCharterButton.hint.txt)
+L.execute('SLASH("charterkey")')
+check("/wls charterkey again turns it back on", g.OVERRIDES["F1"] == "WhoLayerSwapCharterButton" and g.WhoLayerSwapDB.charterKeyOff[g.MYGUID] is None)
+L = fresh('WhoLayerSwapDB={charterKeyOff={["Player-1-OTHER"]=true}} ' + CHARTER)
+check("another character's F1 setting doesn't affect this one", L.globals().OVERRIDES["F1"] == "WhoLayerSwapCharterButton")
+L = fresh('WhoLayerSwapDB={charterKeyOff={["Player-1-0000ME"]=true}} ' + CHARTER)
+check("this character's saved F1-off is respected at login", L.globals().OVERRIDES["F1"] is None and L.globals().WhoLayerSwapCharterButton.shown)
+L = fresh(CHARTER); L.execute('SLASH("settings")')
+L.execute('local c = WhoLayerSwapSettings.checks[5] c:SetChecked(not c:GetChecked()) c.scripts.OnClick(c)')
+check("settings checkbox turns F1 off", L.globals().OVERRIDES["F1"] is None)
+L = fresh('WhoLayerSwapDB={hideCharter=true} ' + CHARTER)
+check("charter button off -> F1 not bound either", L.globals().OVERRIDES["F1"] is None)
+L = fresh(CHARTER); L.execute('CLEAR() BAGS[2][7] = nil INCOMBAT=true EV("BAG_UPDATE_DELAYED")')
+check("charter used up mid-combat -> F1 kept until combat ends (no error)", L.globals().OVERRIDES["F1"] == "WhoLayerSwapCharterButton")
+L.execute('INCOMBAT=false EV("PLAYER_REGEN_ENABLED")')
+check("...then released", L.globals().OVERRIDES["F1"] is None and not L.globals().WhoLayerSwapCharterButton.shown)
+L = fresh(CHARTER); L.execute('CLEAR() CLICK(WhoLayerSwapCharterButton)')
+check("F1/click path runs /use item:5863", L.execute('return has("MACRO /use item:5863")'))
+
+
+# ------------------------------------------------------------- charter: open, then whisper + request signature
+W_TEXT = "Forming a guild, mind signing and you can quit later?"
+def press(L, n=1):
+    for _ in range(n): L.execute('CLICK(WhoLayerSwapCharterButton)')
+L = fresh(CHARTER); L.execute('CLEAR()'); press(L)
+check("window closed, no target -> press opens charter", L.execute('return has("MACRO /use item:5863")') and not L.execute('return has("SAY WHISPER")'), dump(L))
+L.execute('CLEAR() TARGET = { name = "Bob-Dreamscythe" }'); press(L)
+check("window closed, player targeted -> opens charter, says press again", L.execute('return has("MACRO /use item:5863") and said("Press again")') and not L.execute('return has("SAY WHISPER")'), dump(L))
+L.execute('CLEAR() PetitionFrame:Show()'); press(L)
+check("window open + target -> whisper with the exact text", L.execute(f'return has("SAY WHISPER Bob-Dreamscythe {W_TEXT}")'), dump(L))
+check("...then clicks Request Signature", L.execute('return has("MACRO /click PetitionFrameRequestButton")'), dump(L))
+check("...whisper comes before the request (like the macro)", [l for l in L.globals().LOG.values() if l.startswith("SAY WHISPER") or l.startswith("MACRO")][:2] == [f"SAY WHISPER Bob-Dreamscythe {W_TEXT}", "MACRO /click PetitionFrameRequestButton"])
+L.execute('CLEAR()'); press(L)
+check("pressing again on the same person: request again, no second whisper", L.execute('return has("MACRO /click PetitionFrameRequestButton")') and not L.execute('return has("SAY WHISPER")'), dump(L))
+L.execute('CLEAR() ADVANCE(31)'); press(L)
+check("30s later the whisper may go again", L.execute('return has("SAY WHISPER")'), dump(L))
+L.execute('CLEAR() TARGET = { name = "Cat-Dreamscythe" }'); press(L)
+check("next target gets their own whisper + request", L.execute(f'return has("SAY WHISPER Cat-Dreamscythe {W_TEXT}") and has("MACRO /click PetitionFrameRequestButton")'), dump(L))
+L.execute('CLEAR() TARGET = { name = "Rot Howler-Dreamscythe" }'); press(L)
+check("Forever names with spaces work (whisper goes to the full name)", L.execute(f'return has("SAY WHISPER Rot Howler-Dreamscythe {W_TEXT}")'), dump(L))
+L.execute('CLEAR() TARGET = nil'); press(L)
+check("window open, no target -> nothing sent, explains", not L.execute('return has("SAY WHISPER") or has("MACRO")') and L.execute('return said("Target a player")'), dump(L))
+L.execute('CLEAR() TARGET = { name = "Ryan-Dreamscythe", me = true }'); press(L)
+check("targeting yourself -> nothing sent", not L.execute('return has("SAY WHISPER") or has("MACRO /click")'), dump(L))
+L.execute('CLEAR() TARGET = { name = "Boar", player = false }'); press(L)
+check("targeting an NPC -> nothing sent", not L.execute('return has("SAY WHISPER") or has("MACRO /click")'), dump(L))
+L.execute('CLEAR() SIGNED = { "Dan" } TARGET = { name = "Dan-Dreamscythe" }'); press(L)
+check("already signed -> skipped, says so", not L.execute('return has("SAY WHISPER") or has("MACRO /click")') and L.execute('return said("already signed")'), dump(L))
+L.execute('CLEAR() LOCKDOWN=true TARGET = { name = "Eve-Dreamscythe" }'); press(L)
+check("chat lockdown -> no whisper, request still goes", not L.execute('return has("SAY WHISPER")') and L.execute('return has("MACRO /click PetitionFrameRequestButton")'), dump(L))
+L = fresh(CHARTER); L.execute('PetitionFrame:Show() TARGET = { name = "Bob-Dreamscythe" } CLEAR() local b = WhoLayerSwapCharterButton b.scripts.PreClick(b, "LeftButton", true)')
+check("key-down half of F1 does nothing (acts on release only)", not L.execute('return has("SAY WHISPER")'), dump(L))
+L = fresh(CHARTER); L.execute('PetitionFrame:Show() TARGET = { name = "Bob-Dreamscythe" } CLEAR() INCOMBAT=true')
+L.execute('local b = WhoLayerSwapCharterButton b.scripts.PreClick(b, "LeftButton", false)')
+check("in combat: no attribute change, no error", not L.execute('return has("SAY WHISPER")'))
+L = fresh(CHARTER); L.execute('CLEAR() SLASH("charterwhisper Hey! Could you sign our charter?") PetitionFrame:Show() TARGET = { name = "Ana-Dreamscythe" }'); press(L)
+check("/wls charterwhisper changes the text", L.execute('return has("SAY WHISPER Ana-Dreamscythe Hey! Could you sign our charter?")'), dump(L))
+L.execute('CLEAR() SLASH("charterwhisper")')
+check("/wls charterwhisper with no text resets to default", L.execute(f'return said("{W_TEXT}")'), dump(L))
+L = fresh('BAGS[0][3] = { itemID = 99999, itemName = "Guild Charter", iconFileID = 1 }'); L.execute('CLEAR()'); press(L)
+check("opening uses the charter's own item ID", L.execute('return has("MACRO /use item:99999")'), dump(L))
 
 print(f"\n{PASS} passed, {len(FAIL)} failed")
 for f in FAIL: print("FAIL:", f)

@@ -241,13 +241,15 @@ end
 
 ------------------------------------------------------------------------------
 -- Inviting: Forever only sends a guild invite from a real click, so requests go
--- into a queue shown as an "Invite <name>" button. Whoever clicks first claims the
--- person over a guild addon message; everyone else's button drops them.
+-- into the invite queue: a small list, one row per person, each with its own Invite
+-- button, gone after 20 seconds. Whoever clicks first claims the person (guild +
+-- swap channel addon message); everyone else's row for them disappears.
 ------------------------------------------------------------------------------
 local lastInvite = {}   -- [name-realm lower] = GetTime() I invited them
 local claimed    = {}   -- [name-realm lower] = GetTime() someone in the guild invited them
 local queue      = {}   -- { name =, key =, lang =, at = }, oldest first
-local QUEUE_TTL  = 120  -- seconds a request stays clickable
+local QUEUE_TTL  = 20   -- seconds a request stays on the list
+local lastPing   = 0
 
 local function Recently(tbl, key)
     return tbl[key] and (GetTime() - tbl[key]) < COOLDOWN
@@ -257,7 +259,7 @@ local function CanInviteNow()
     return IsInGuild() and CanGuildInvite() and not InLockdown()
 end
 
-local UpdateInviteButton   -- defined with the panel
+local UpdateQueue   -- defined with the panel
 
 local function PruneQueue()
     local now, kept = GetTime(), {}
@@ -276,16 +278,33 @@ local function Enqueue(name, lang, why)
         if e.key == key then e.at = GetTime(); return end   -- asked again: keep one entry
     end
     queue[#queue + 1] = { name = name, key = key, lang = lang, at = GetTime() }
-    if PlaySound and SOUNDKIT and SOUNDKIT.MAP_PING then pcall(PlaySound, SOUNDKIT.MAP_PING, "SFX") end
-    Print(("%s wants into your guild (%s). Click |cffffd100Invite %s|r in the middle of your screen.")
-        :format(Short(name), why, Short(name)))
-    if UpdateInviteButton then UpdateInviteButton() end
+    -- one quiet ping now and then, not one per person
+    if DB().noPing ~= true and GetTime() - lastPing > 8 and PlaySound and SOUNDKIT and SOUNDKIT.MAP_PING then
+        lastPing = GetTime()
+        pcall(PlaySound, SOUNDKIT.MAP_PING, "SFX")
+    end
+    Debug(("%s added to the invite queue (%s)."):format(Short(name), why))
+    if UpdateQueue then UpdateQueue() end
+end
+
+local QUEUE_ROWS = 8
+local queueSlots = {}   -- [row] = key of the person shown in that row
+
+local function QueueEntry(key)
+    if not key then return end
+    for _, e in ipairs(queue) do if e.key == key then return e end end
+end
+
+local function RemoveFromQueue(key)
+    for i, e in ipairs(queue) do
+        if e.key == key then table.remove(queue, i); return end
+    end
 end
 
 local function MarkClaimed(key)
     claimed[key] = GetTime()
     PruneQueue()
-    if UpdateInviteButton then UpdateInviteButton() end
+    if UpdateQueue then UpdateQueue() end
 end
 
 local LANG_LABEL = { english = "English", spanish = "Latam", portuguese = "Portuguese" }
@@ -438,90 +457,56 @@ local function AfterSwap(plan)
 end
 
 ------------------------------------------------------------------------------
--- Invite button position (it's a secure button, so it only moves out of combat)
+-- Invite queue position (it holds secure buttons, so it only moves out of combat)
 ------------------------------------------------------------------------------
 local panel
 local ToggleSettings, RefreshSettings     -- defined with the settings window
-local UpdateCharterButton                 -- defined with the charter button
-local DEFAULT_INVITE_POINT = { "CENTER", "CENTER", 0, 140 }
-local invitePosPending = false
+local UpdateCharterButton, CharterMacro   -- defined with the charter button
+local queuePreview = false                -- "Move queue": show it even when empty
+local queuePosPending = false
 
-local function InvitePoint()
-    local p = DB().invitePoint
+local function QueuePoint()
+    local p = DB().queuePoint
     if type(p) == "table" and type(p[1]) == "string" and type(p[2]) == "string"
         and type(p[3]) == "number" and type(p[4]) == "number" then
         return p
     end
-    return DEFAULT_INVITE_POINT
 end
 
-local function ApplyInvitePosition()
-    local inv = panel and panel.invite
-    if not inv then return end
-    if InCombatLockdown() then invitePosPending = true; return end
-    local p = InvitePoint()
-    inv:ClearAllPoints()
-    inv:SetPoint(p[1], UIParent, p[2], p[3], p[4])
-    invitePosPending = false
+local function ApplyQueuePosition()
+    local q = panel and panel.queue
+    if not q then return end
+    if InCombatLockdown() then queuePosPending = true; return end
+    q:ClearAllPoints()
+    local p = QueuePoint()
+    if p then
+        q:SetPoint(p[1], UIParent, p[2], p[3], p[4])
+    else
+        q:SetPoint("TOPRIGHT", panel, "BOTTOMRIGHT", 0, -6)   -- default: under the Layer swap panel
+    end
+    queuePosPending = false
 end
 
--- A stand-in you drag around; the real button follows when you let go.
-local mover
-local function PlaceMover()
-    local p = InvitePoint()
-    mover:ClearAllPoints()
-    mover:SetPoint(p[1], UIParent, p[2], p[3], p[4])
-end
+local function IsMoving() return queuePreview end
 
 local function StopMoveMode()
-    if mover then mover:Hide() end
+    queuePreview = false
+    if UpdateQueue then UpdateQueue() end
     if RefreshSettings then RefreshSettings() end
 end
 
 local function StartMoveMode()
-    if InCombatLockdown() then Print("Can't move the invite button in combat."); return end
-    if not mover then
-        mover = CreateFrame("Frame", "WhoLayerSwapInviteMover", UIParent)
-        mover:SetSize(240, 36)
-        mover:SetFrameStrata("FULLSCREEN_DIALOG")
-        mover:SetClampedToScreen(true)
-        mover:SetMovable(true)
-        mover:EnableMouse(true)
-        mover:RegisterForDrag("LeftButton")
-        local bg = mover:CreateTexture(nil, "BACKGROUND")
-        bg:SetAllPoints()
-        bg:SetColorTexture(0.1, 0.35, 0.15, 0.85)
-        local edge = mover:CreateTexture(nil, "BORDER")
-        edge:SetPoint("TOPLEFT"); edge:SetPoint("TOPRIGHT"); edge:SetHeight(2)
-        edge:SetColorTexture(0.2, 1, 0.6, 1)
-        local t = mover:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-        t:SetPoint("CENTER", 0, 1)
-        t:SetText("Invite button")
-        local hint = mover:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        hint:SetPoint("TOP", mover, "BOTTOM", 0, -4)
-        hint:SetText("Drag to move · right-click when done")
-        mover:SetScript("OnDragStart", function(self) self:StartMoving() end)
-        mover:SetScript("OnDragStop", function(self)
-            self:StopMovingOrSizing()
-            local point, _, rel, x, y = self:GetPoint()
-            DB().invitePoint = { point, rel, x, y }
-            ApplyInvitePosition()
-            if invitePosPending then Print("The invite button will move there after combat.") end
-        end)
-        mover:SetScript("OnMouseUp", function(self, mouse) if mouse == "RightButton" then StopMoveMode() end end)
-    end
-    PlaceMover()
-    mover:Show()
+    if InCombatLockdown() then Print("Can't move the invite queue in combat."); return end
+    queuePreview = true
+    if UpdateQueue then UpdateQueue() end
     if RefreshSettings then RefreshSettings() end
+    Print("Drag the invite queue by its title. Click Done moving (or /wls movequeue) when finished.")
 end
 
-local function IsMoving() return mover ~= nil and mover:IsShown() end
-
-local function ResetInvitePosition()
-    DB().invitePoint = nil
-    ApplyInvitePosition()
-    if IsMoving() then PlaceMover() end
-    Print("Invite button moved back to the middle of the screen.")
+local function ResetQueuePosition()
+    DB().queuePoint = nil
+    ApplyQueuePosition()
+    Print("Invite queue moved back under the Layer swap panel.")
 end
 
 ------------------------------------------------------------------------------
@@ -620,100 +605,155 @@ local function BuildPanel()
         panel.buttons[i] = b
     end
 
-    -- "Invite <name>" button for guild members (secure macro running /ginvite)
-    -- Big glowing button just above the middle of the screen.
-    local inv = CreateFrame("Button", "WhoLayerSwapInviteButton", UIParent, "UIPanelButtonTemplate, SecureActionButtonTemplate")
-    inv:SetSize(240, 36)
-    inv:SetFrameStrata("DIALOG")
-    if inv.SetNormalFontObject then inv:SetNormalFontObject("GameFontNormalLarge") end
-    if inv.SetHighlightFontObject then inv:SetHighlightFontObject("GameFontHighlightLarge") end
-    -- Blizzard's own button glow (the one StaticPopup buttons flash with), pulsing.
-    local glow = inv:CreateTexture(nil, "BACKGROUND")
-    glow:SetTexture("Interface\\Buttons\\UI-Panel-Button-Glow")
-    glow:SetTexCoord(0, 0.75, 0, 0.609375)
-    glow:SetBlendMode("ADD")
-    glow:SetSize(290, 64)
-    glow:SetPoint("CENTER")
-    local pulse = glow:CreateAnimationGroup()
-    if pulse then
-        pulse:SetLooping("BOUNCE")
-        local fade = pulse:CreateAnimation("Alpha")
+    -- Invite queue: one row per person asking, each with its own secure Invite button
+    -- (macro "/ginvite <name>", set at click time). Rows keep their slot until the
+    -- person leaves the list, so nothing shifts under your mouse.
+    local q = CreateFrame("Frame", "WhoLayerSwapQueue", UIParent)
+    q:SetSize(224, 52)
+    q:SetFrameStrata("MEDIUM")
+    q:SetClampedToScreen(true)
+    q:SetMovable(true)
+    q:EnableMouse(true)
+    q:RegisterForDrag("LeftButton")
+    q:SetScript("OnDragStart", function(self) if not InCombatLockdown() then self:StartMoving() end end)
+    q:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, rel, x, y = self:GetPoint()
+        DB().queuePoint = { point, rel, x, y }
+    end)
+    local qbg = q:CreateTexture(nil, "BACKGROUND")
+    qbg:SetAllPoints()
+    qbg:SetColorTexture(0, 0, 0, 0.6)
+    q.title = q:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    q.title:SetPoint("TOPLEFT", 8, -6)
+    q.title:SetText("Invite queue")
+    q.count = q:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    q.count:SetPoint("TOPRIGHT", -8, -8)
+    q.empty = q:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    q.empty:SetPoint("TOPLEFT", 10, -28)
+    q.empty:SetText("No one waiting · drag the title to move")
+    q.more = q:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    q.rows = {}
+    for i = 1, QUEUE_ROWS do
+        local y = -26 - (i - 1) * 22
+        local r = {}
+        r.name = q:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+        r.name:SetPoint("TOPLEFT", 10, y - 3)
+        r.name:SetWidth(112)
+        r.name:SetJustifyH("LEFT")
+        if r.name.SetWordWrap then r.name:SetWordWrap(false) end
+        r.time = q:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        r.time:SetPoint("TOPRIGHT", -74, y - 5)
+        local btn = CreateFrame("Button", "WhoLayerSwapQueueInvite" .. i, q, "UIPanelButtonTemplate, SecureActionButtonTemplate")
+        btn:SetSize(62, 20)
+        btn:SetPoint("TOPRIGHT", -6, y)
+        btn:SetText("Invite")
+        btn:RegisterForClicks("AnyUp")
+        btn:SetAttribute("useOnKeyDown", false)
+        btn:SetAttribute("type", "macro")
+        btn:SetAttribute("macrotext", "")
+        btn.slot = i
+        btn:SetScript("PreClick", function(self, mouse)
+            self.inviting = nil
+            if InCombatLockdown() then Print("Can't invite in combat; they'll still be on the list after if there's time."); return end
+            PruneQueue()
+            local e = QueueEntry(queueSlots[self.slot])
+            if not e then self:SetAttribute("macrotext", ""); return end
+            if mouse == "RightButton" then                 -- right-click: skip this person
+                RemoveFromQueue(e.key); self:SetAttribute("macrotext", ""); return
+            end
+            if not CanInviteNow() then
+                Print("You can't invite right now (rank, guild or chat lockdown)."); self:SetAttribute("macrotext", ""); return
+            end
+            self.inviting = e
+            self:SetAttribute("macrotext", "/ginvite " .. e.name)
+        end)
+        btn:SetScript("PostClick", function(self)
+            local e = self.inviting
+            self.inviting = nil
+            if not InCombatLockdown() then self:SetAttribute("macrotext", "") end
+            if e then
+                lastInvite[e.key] = GetTime()
+                RemoveFromQueue(e.key)
+                if C_ChatInfo and C_ChatInfo.SendAddonMessage then
+                    pcall(C_ChatInfo.SendAddonMessage, COMM, "CLAIM:" .. e.key, "GUILD")
+                    -- and on the swap channel, so members of the backup guild stand down too
+                    local cid = ChannelId()
+                    if cid then pcall(C_ChatInfo.SendAddonMessage, COMM, "CLAIM:" .. e.key, "CHANNEL", tostring(cid)) end
+                end
+                if cfg.verbose then Print(("Invited %s."):format(Short(e.name))) end
+            end
+            UpdateQueue()
+        end)
+        btn:SetScript("OnEnter", function(self)
+            local e = QueueEntry(queueSlots[self.slot])
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:SetText(e and Short(e.name) or "Invite")
+            GameTooltip:AddLine("Left-click: invite. Right-click: skip.", 1, 1, 1, true)
+            GameTooltip:Show()
+        end)
+        btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        btn:Hide()
+        r.btn = btn
+        q.rows[i] = r
+    end
+    q:Hide()
+    panel.queue = q
+    ApplyQueuePosition()
+
+    -- Guild Charter button: big and glowing, just below the middle of the screen, shown
+    -- while a charter is in your bags. Secure macro "/use item:<id>", so it opens the
+    -- charter (or offers it to your target for a signature).
+    local ch = CreateFrame("Button", "WhoLayerSwapCharterButton", UIParent, "UIPanelButtonTemplate, SecureActionButtonTemplate")
+    ch:SetSize(280, 52)
+    ch:SetPoint("CENTER", UIParent, "CENTER", 0, 60)
+    ch:SetFrameStrata("DIALOG")
+    ch:RegisterForClicks("AnyUp", "AnyDown")   -- down too, so the F1 key binding reaches it
+    ch:SetAttribute("useOnKeyDown", false)     -- acts on release, for both mouse and F1
+    ch:SetAttribute("type", "macro")
+    ch:SetAttribute("macrotext", "")
+    if ch.SetNormalFontObject then ch:SetNormalFontObject("GameFontNormalHuge") end
+    if ch.SetHighlightFontObject then ch:SetHighlightFontObject("GameFontHighlightHuge") end
+    ch:SetText("      Guild Charter")
+    ch.icon = ch:CreateTexture(nil, "OVERLAY")
+    ch.icon:SetSize(38, 38)
+    ch.icon:SetPoint("LEFT", 10, 0)
+    -- same pulsing Blizzard button glow as the invite button
+    local cglow = ch:CreateTexture(nil, "BACKGROUND")
+    cglow:SetTexture("Interface\\Buttons\\UI-Panel-Button-Glow")
+    cglow:SetTexCoord(0, 0.75, 0, 0.609375)
+    cglow:SetBlendMode("ADD")
+    cglow:SetSize(340, 92)
+    cglow:SetPoint("CENTER")
+    local cpulse = cglow:CreateAnimationGroup()
+    if cpulse then
+        cpulse:SetLooping("BOUNCE")
+        local fade = cpulse:CreateAnimation("Alpha")
         fade:SetFromAlpha(0.35)
         fade:SetToAlpha(1)
         fade:SetDuration(0.7)
         fade:SetSmoothing("IN_OUT")
-        inv:HookScript("OnShow", function() pulse:Play() end)
-        inv:HookScript("OnHide", function() pulse:Stop() end)
+        ch:HookScript("OnShow", function() cpulse:Play() end)
+        ch:HookScript("OnHide", function() cpulse:Stop() end)
     end
-    local label = inv:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    label:SetPoint("BOTTOM", inv, "TOP", 0, 6)
-    label:SetText("Guild invite request · right-click to skip")
-    inv:RegisterForClicks("AnyUp")
-    inv:SetAttribute("useOnKeyDown", false)
-    inv:SetAttribute("type", "macro")
-    inv:SetAttribute("macrotext", "")
-    inv:Hide()
-    inv:SetScript("PreClick", function(self, mouse)
-        self.inviting = nil
-        if InCombatLockdown() then Print("Can't invite in combat; it'll still be here after."); return end
-        PruneQueue()
-        local e = queue[1]
-        if not e then self:SetAttribute("macrotext", ""); return end
-        if mouse == "RightButton" then        -- right-click skips this person
-            table.remove(queue, 1); self:SetAttribute("macrotext", ""); return
-        end
-        if not CanInviteNow() then
-            Print("You can't invite right now (rank, guild or chat lockdown)."); self:SetAttribute("macrotext", ""); return
-        end
-        self.inviting = e
-        self:SetAttribute("macrotext", "/ginvite " .. e.name)
+    local chint = ch:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    chint:SetPoint("TOP", ch, "BOTTOM", 0, -6)
+    ch.hint = chint
+    -- Each press: open the charter, or (window open + a player targeted) whisper them
+    -- and press the window's Request Signature button, like the macro:
+    --   /run SendChatMessage("Forming a guild...", "WHISPER", nil, GetUnitName("target"))
+    --   /click PetitionFrameRequestButton
+    ch:SetScript("PreClick", function(self, mouse, down)
+        if down or InCombatLockdown() then return end   -- act on release; no attribute changes in combat
+        self:SetAttribute("macrotext", CharterMacro(self))
     end)
-    inv:SetScript("PostClick", function(self)
-        local e = self.inviting
-        self.inviting = nil
-        if not InCombatLockdown() then self:SetAttribute("macrotext", "") end
-        if e then
-            lastInvite[e.key] = GetTime()
-            if C_ChatInfo and C_ChatInfo.SendAddonMessage then
-                pcall(C_ChatInfo.SendAddonMessage, COMM, "CLAIM:" .. e.key, "GUILD")
-                -- and on the swap channel, so members of the backup guild stand down too
-                local cid = ChannelId()
-                if cid then pcall(C_ChatInfo.SendAddonMessage, COMM, "CLAIM:" .. e.key, "CHANNEL", tostring(cid)) end
-            end
-            if cfg.verbose then Print(("Invited %s."):format(Short(e.name))) end
-        end
-        PruneQueue()
-        UpdateInviteButton()
-    end)
-    inv:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:SetText("Guild invite")
-        GameTooltip:AddLine("Left-click: invite. Right-click: skip.", 1, 1, 1, true)
-        if #queue > 1 then GameTooltip:AddLine(("%d more waiting."):format(#queue - 1), 0.6, 0.6, 0.6) end
-        GameTooltip:Show()
-    end)
-    inv:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    panel.invite = inv
-    ApplyInvitePosition()
-
-    -- Guild Charter button under the panel, shown while a charter is in your bags.
-    -- Secure macro "/use item:<id>", so it opens the charter (or offers it to your target).
-    local ch = CreateFrame("Button", "WhoLayerSwapCharterButton", UIParent, "UIPanelButtonTemplate, SecureActionButtonTemplate")
-    ch:SetSize(112, 26)
-    ch:SetPoint("TOP", panel, "BOTTOM", 0, -4)
-    ch:RegisterForClicks("AnyUp")
-    ch:SetAttribute("useOnKeyDown", false)
-    ch:SetAttribute("type", "macro")
-    ch:SetAttribute("macrotext", "")
-    ch:SetText("      Guild Charter")
-    ch.icon = ch:CreateTexture(nil, "OVERLAY")
-    ch.icon:SetSize(18, 18)
-    ch.icon:SetPoint("LEFT", 6, 0)
     ch:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:SetText("Guild Charter")
-        GameTooltip:AddLine("Click to open your charter.", 1, 1, 1, true)
-        GameTooltip:AddLine("Target a player first to ask them to sign it.", 1, 1, 1, true)
+        GameTooltip:AddLine("Press once to open your charter.", 1, 1, 1, true)
+        GameTooltip:AddLine("Then target a player and press again: they get a whisper and a signature request.", 1, 1, 1, true)
+        GameTooltip:AddLine("F1 does the same while you carry a charter (per character; Settings or /wls charterkey).", 0.6, 0.6, 0.6, true)
+        GameTooltip:AddLine("Turn the button off in Settings or with /wls charter.", 0.6, 0.6, 0.6, true)
         GameTooltip:Show()
     end)
     ch:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -747,25 +787,87 @@ local function BuildPanel()
     if DB().hidden then panel:Hide() end
 end
 
--- Show the first waiting request (secure buttons can only change out of combat).
-UpdateInviteButton = function()
-    local inv = panel and panel.invite
-    if not inv or InCombatLockdown() then return end
-    PruneQueue()
-    local e = queue[1]
-    if e then
-        inv:SetText(("Invite %s%s"):format(Short(e.name), #queue > 1 and (" (+" .. (#queue - 1) .. ")") or ""))
-        inv:Show()
-    else
-        inv:Hide()
+-- Redraw the invite queue. Rows hold secure buttons, so the list can only change
+-- out of combat; in combat it stays as it was and catches up afterwards.
+local queueDirty = false
+UpdateQueue = function()
+    local q = panel and panel.queue
+    if not q then return end
+    if InCombatLockdown() then
+        queueDirty = true
+        if q:IsShown() then q.count:SetText("in combat") end
+        return
     end
+    queueDirty = false
+    PruneQueue()
+    -- free the slots of people who left the list, then seat newcomers (oldest first)
+    local seated = {}
+    for i = 1, QUEUE_ROWS do
+        if queueSlots[i] and not QueueEntry(queueSlots[i]) then queueSlots[i] = nil end
+        if queueSlots[i] then seated[queueSlots[i]] = true end
+    end
+    for _, e in ipairs(queue) do
+        if not seated[e.key] then
+            for i = 1, QUEUE_ROWS do
+                if not queueSlots[i] then queueSlots[i] = e.key; seated[e.key] = true; break end
+            end
+        end
+    end
+    local now, used, shown = GetTime(), 0, 0
+    for i = 1, QUEUE_ROWS do
+        local r, e = q.rows[i], QueueEntry(queueSlots[i])
+        if e then
+            r.name:SetText(Short(e.name))
+            r.time:SetText(math.max(0, math.ceil(QUEUE_TTL - (now - e.at))) .. "s")
+            r.btn:Show()
+            used, shown = i, shown + 1
+        else
+            r.name:SetText("")
+            r.time:SetText("")
+            r.btn:Hide()
+        end
+    end
+    local waiting = #queue - shown
+    q.count:SetText(#queue > 0 and tostring(#queue) or "")
+    q.empty:SetShown(#queue == 0)
+    q.more:ClearAllPoints()
+    q.more:SetPoint("TOPLEFT", 10, -28 - math.max(used, 1) * 22 + 4)
+    q.more:SetText(waiting > 0 and ("+" .. waiting .. " more waiting") or "")
+    q:SetHeight(32 + math.max(used, 1) * 22 + (waiting > 0 and 12 or 0))
+    q:SetShown(#queue > 0 or queuePreview)
 end
+
+-- Count the seconds down while anyone is waiting.
+local queueClock = CreateFrame("Frame")
+local clockElapsed = 0
+queueClock:SetScript("OnUpdate", function(self, elapsed)
+    clockElapsed = clockElapsed + elapsed
+    if clockElapsed < 0.5 then return end
+    clockElapsed = 0
+    if #queue > 0 or (panel and panel.queue and panel.queue:IsShown()) or queueDirty then UpdateQueue() end
+end)
 
 ------------------------------------------------------------------------------
 -- Guild Charter button
 ------------------------------------------------------------------------------
 local CHARTER_ITEM_ID = 5863     -- Guild Charter in Classic; also matched by name below
+local CHARTER_KEY = "F1"
 local charterPending = false
+
+-- F1 for the charter is on unless this character turned it off. It's an override
+-- binding: it only exists while the charter is in your bags, and your saved key
+-- bindings are never changed (F1 goes back to targeting yourself afterwards).
+local function CharterKeyOn()
+    local g, t = UnitGUID("player"), DB().charterKeyOff
+    return not (type(t) == "table" and type(g) == "string" and t[g])
+end
+
+local function SetCharterKeyOn(on)
+    local g = UnitGUID("player")
+    if type(g) ~= "string" then return end
+    if type(DB().charterKeyOff) ~= "table" then DB().charterKeyOff = {} end
+    DB().charterKeyOff[g] = (not on) and true or nil
+end
 
 -- Returns the charter's item ID and icon if one is in your bags.
 local function FindCharter()
@@ -791,6 +893,51 @@ local function FindCharter()
     end
 end
 
+-- Whisper sent with each signature request (change with /wls charterwhisper <text>).
+local DEFAULT_CHARTER_WHISPER = "Forming a guild, mind signing and you can quit later?"
+local lastCharterWhisper = {}    -- [name] = GetTime(), so repeat presses don't spam
+
+local function CharterWhisperText()
+    local t = DB().charterWhisper
+    return (type(t) == "string" and t ~= "") and t or DEFAULT_CHARTER_WHISPER
+end
+
+local function AlreadySigned(name)
+    if not (GetNumPetitionNames and GetPetitionNameInfo) then return false end
+    local short = Short(name):lower()
+    for i = 1, (GetNumPetitionNames() or 0) do
+        local signed = GetPetitionNameInfo(i)
+        if type(signed) == "string" and not IsSecret(signed) and Short(signed):lower() == short then return true end
+    end
+    return false
+end
+
+-- Decide what this press does; returns the macro for the secure button to run.
+CharterMacro = function(b)
+    local open = "/use item:" .. tostring(b.itemID or CHARTER_ITEM_ID)
+    local windowOpen = PetitionFrame and PetitionFrame:IsShown()
+    local hasTarget = UnitExists("target") and UnitIsPlayer("target") and not UnitIsUnit("target", "player")
+    local name = hasTarget and GetUnitName("target", true)
+    if not windowOpen then
+        if hasTarget then Print("Charter opened. Press again to ask your target to sign.") end
+        return open
+    end
+    if type(name) ~= "string" or IsSecret(name) then
+        Print("Target a player, then press again to ask them to sign.")
+        return ""
+    end
+    if AlreadySigned(name) then
+        Print(("%s has already signed."):format(Short(name)))
+        return ""
+    end
+    local key = name:lower()
+    if not (lastCharterWhisper[key] and GetTime() - lastCharterWhisper[key] < 30) and not InLockdown() then
+        lastCharterWhisper[key] = GetTime()
+        pcall(C_ChatInfo.SendChatMessage, CharterWhisperText(), "WHISPER", nil, name)
+    end
+    return "/click PetitionFrameRequestButton"
+end
+
 UpdateCharterButton = function()
     local b = panel and panel.charter
     if not b then return end
@@ -798,9 +945,15 @@ UpdateCharterButton = function()
     charterPending = false
     local id, icon
     if DB().hideCharter ~= true then id, icon = FindCharter() end
+    if ClearOverrideBindings then ClearOverrideBindings(b) end
     if id then
+        b.itemID = id
         b:SetAttribute("macrotext", "/use item:" .. id)
         b.icon:SetTexture(icon or 134400)
+        local keyOn = CharterKeyOn() and SetOverrideBindingClick ~= nil
+        if keyOn then SetOverrideBindingClick(b, true, CHARTER_KEY, b:GetName(), "LeftButton") end
+        b.hint:SetText((keyOn and ("Press " .. CHARTER_KEY .. " or click") or "Click")
+            .. " to open · then target a player and press again to ask them to sign")
         b:Show()
     else
         b:SetAttribute("macrotext", "")
@@ -852,7 +1005,7 @@ end
 
 local function BuildSettings()
     local s = CreateFrame("Frame", "WhoLayerSwapSettings", UIParent, "DefaultPanelTemplate")
-    s:SetSize(340, 456)
+    s:SetSize(340, 508)
     s:SetPoint("CENTER")
     s:SetFrameStrata("DIALOG")
     s:SetClampedToScreen(true)
@@ -927,7 +1080,7 @@ local function BuildSettings()
     end)
 
     -- Invite button
-    Header("Invite button", -238)
+    Header("Invite queue", -238)
     local move = CreateFrame("Button", nil, s, "UIPanelButtonTemplate")
     move:SetSize(150, 22)
     move:SetPoint("TOPLEFT", 22, -260)
@@ -937,7 +1090,7 @@ local function BuildSettings()
     resetPos:SetSize(130, 22)
     resetPos:SetPoint("LEFT", move, "RIGHT", 8, 0)
     resetPos:SetText("Reset position")
-    resetPos:SetScript("OnClick", ResetInvitePosition)
+    resetPos:SetScript("OnClick", ResetQueuePosition)
 
     -- General
     Header("General", -296)
@@ -966,9 +1119,15 @@ local function BuildSettings()
     Check(4, "Show a Guild Charter button when you carry one",
         function() return DB().hideCharter ~= true end,
         function(v) DB().hideCharter = (not v) and true or nil; UpdateCharterButton() end)
-    Check(5, "Debug messages (why requests were or weren't invited)",
+    Check(5, "F1 opens the Guild Charter (this character)",
+        function() return CharterKeyOn() end,
+        function(v) SetCharterKeyOn(v); UpdateCharterButton() end)
+    Check(6, "Debug messages (why requests were or weren't invited)",
         function() return cfg.debug end,
         function(v) cfg.debug = v end)
+    Check(7, "Ping when someone joins the invite queue",
+        function() return DB().noPing ~= true end,
+        function(v) DB().noPing = (not v) and true or nil end)
 
     s:SetScript("OnShow", function() RefreshSettings() end)
     s:SetScript("OnHide", function() StopMoveMode() end)
@@ -980,7 +1139,7 @@ RefreshSettings = function()
     for lang, e in pairs(settings.edits) do
         if not (e.HasFocus and e:HasFocus()) then e:SetText(ExtraText(lang)); e.hint:SetShown(ExtraText(lang) == "") end
     end
-    settings.move:SetText(IsMoving() and "Done moving" or "Move invite button")
+    settings.move:SetText(IsMoving() and "Done moving" or "Move invite queue")
     for _, c in ipairs(settings.checks) do c:SetChecked(c.get() and true or false) end
 end
 
@@ -1042,7 +1201,7 @@ f:SetScript("OnEvent", function(self, event, ...)
             if lastGuild == false then lastGuild = MyGuild() end
         end)
         -- expire old requests from the button now and then
-        local function tick() PruneQueue(); if UpdateInviteButton then UpdateInviteButton() end; C_Timer.After(10, tick) end
+        local function tick() PruneQueue(); if UpdateQueue then UpdateQueue() end; C_Timer.After(10, tick) end
         C_Timer.After(10, tick)
         return
     end
@@ -1073,11 +1232,11 @@ f:SetScript("OnEvent", function(self, event, ...)
     end
 
     if event == "PLAYER_GUILD_UPDATE" or event == "PLAYER_REGEN_ENABLED" then
-        if invitePosPending then ApplyInvitePosition() end
+        if queuePosPending then ApplyQueuePosition() end
         if charterPending then UpdateCharterButton() end
         RefreshPanel()
         if lastGuild ~= false then CheckGuildChange() end
-        if UpdateInviteButton then UpdateInviteButton() end
+        if UpdateQueue then UpdateQueue() end
         return
     end
 
@@ -1187,7 +1346,15 @@ SlashCmdList["WHOLAYERSWAP"] = function(input)
         UpdateCharterButton()
         RefreshSettings()
         Print("Guild Charter button " .. (DB().hideCharter and "off." or "on (shows while you carry a charter)."))
-    elseif cmd == "moveinvite" then
+    elseif cmd == "charterwhisper" then
+        DB().charterWhisper = (rest ~= "") and rest or nil
+        Print("Signature whisper: \"" .. CharterWhisperText() .. "\"")
+    elseif cmd == "charterkey" then
+        SetCharterKeyOn(not CharterKeyOn())
+        UpdateCharterButton()
+        RefreshSettings()
+        Print("F1 for the Guild Charter " .. (CharterKeyOn() and "on" or "off") .. " for this character.")
+    elseif cmd == "movequeue" or cmd == "moveinvite" then
         if IsMoving() then StopMoveMode() else StartMoveMode() end
     elseif cmd == "phrases" then
         for _, b in ipairs({ "english", "spanish", "portuguese" }) do
@@ -1216,6 +1383,6 @@ SlashCmdList["WHOLAYERSWAP"] = function(input)
             cfg.enabled and "On" or "Off", id and ("joined (/" .. id .. ")") or "NOT joined (/wls join)",
             g and ("<" .. g .. ">") or "none", myLang or "nobody",
             (IsInGuild() and CanGuildInvite()) and "yes" or "no"))
-        Print("/wls settings | guild <lang> <name> | moveinvite | charter | on | off | quiet | accept | show | hide | lock | reset | join | showchannel | phrases | toast | debug | test <message>")
+        Print("/wls settings | guild <lang> <name> | movequeue | charter | charterkey | charterwhisper <text> | on | off | quiet | accept | show | hide | lock | reset | join | showchannel | phrases | toast | debug | test <message>")
     end
 end
