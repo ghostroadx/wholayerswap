@@ -78,7 +78,7 @@ Open them with the gear on the panel, right-click the panel, `/wls settings`, or
 - Secure buttons can't change during combat, so the invite queue, the charter button and F1 only update out of combat, and the panels can't be moved mid-fight.
 - Chat is hidden from addons during chat lockdown (boss fights, rated PvP), so requests then are skipped.
 - Party invites don't help: leaving a group sends you straight back to your own layer. Guild plus relog does.
-- Forever's beta doesn't always load saved addon settings back after a relog, so custom settings may reset until Blizzard fixes it.
+- Forever's beta sometimes hands addons their saved settings *after* login. Since 1.9.1 the addon re-reads them whenever they change, so extra guild names, auto-accept and positions apply even when they arrive late. (1.9.0 and earlier only read them once at login: the Settings window would show an extra name while the inviter ignored requests for it. Everyone inviting for a custom-named guild should update.)
 
 ## Tests
 

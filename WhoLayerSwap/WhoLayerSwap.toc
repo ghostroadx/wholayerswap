@@ -2,7 +2,7 @@
 ## Title: WhoLayerSwap
 ## Notes: Layer swap between <who>, <quien> and <quem>: one-click leave-and-request buttons, auto-invites over a hidden channel, auto-accept.
 ## Author: Ryan
-## Version: 1.9.0
+## Version: 1.9.1
 ## SavedVariables: WhoLayerSwapDB
 
 WhoLayerSwap.lua

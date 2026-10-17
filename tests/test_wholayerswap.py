@@ -1,10 +1,7 @@
-"""Offline tests for WhoLayerSwap: runs the real addon against a mock Forever client (wls_mock.lua)."""
 import lupa, sys, os
 SP = os.path.dirname(os.path.abspath(__file__))
 MOCK = open(os.path.join(SP, "wls_mock.lua"), encoding="utf-8").read()
-# Usage: python3 tests/test_wholayerswap.py [path/to/WhoLayerSwap.lua]   (needs: pip install lupa)
-ADDON_PATH = sys.argv[1] if len(sys.argv) > 1 else os.path.join(SP, "..", "WhoLayerSwap", "WhoLayerSwap.lua")
-ADDON = open(ADDON_PATH, encoding="utf-8").read()
+ADDON = open(sys.argv[1], encoding="utf-8").read()
 PASS, FAIL = 0, []
 CH = "whoguildlayerswapchannel"
 
@@ -583,6 +580,35 @@ L.execute('CLEAR() SLASH("charterwhisper")')
 check("/wls charterwhisper with no text resets to default", L.execute(f'return said("{W_TEXT}")'), dump(L))
 L = fresh('BAGS[0][3] = { itemID = 99999, itemName = "Guild Charter", iconFileID = 1 }'); L.execute('CLEAR()'); press(L)
 check("opening uses the charter's own item ID", L.execute('return has("MACRO /use item:99999")'), dump(L))
+
+# ------------------------------------------------------------- saved settings that arrive late (Forever beta)
+def late(after, lang="spanish", sender="Ken Lastname-Dreamscythe"):
+    L = fresh('GUILD="quen"'); L.execute(after + ' ADVANCE(3) CLEAR() REQ("%s","%s") ADVANCE(2)' % (lang, sender)); return L
+L = late('WhoLayerSwapDB={guilds={spanish="quen"}}')
+check("saved table replaced after login -> custom Latam name still invites", L.execute('return SHOWN_NAMES()') == "1:Ken Lastname", dump(L))
+L = late('WhoLayerSwapDB.guilds={spanish="quen"}')
+check("saved table filled in after login -> custom Latam name still invites", L.execute('return SHOWN_NAMES()') == "1:Ken Lastname", dump(L))
+L = late('WhoLayerSwapDB={guilds={spanish="quen"}}'); L.execute('CLEAR() SLASH("settings") ADVANCE(1)')
+check("settings window and matcher agree on the late name", L.globals().WhoLayerSwapGuildEdit2.txt == "quen")
+L = fresh('GUILD="quen"'); L.execute('WhoLayerSwapDB={guilds={spanish="quen"}} CLEAR() REQ("spanish","Ken Lastname-Dreamscythe") ADVANCE(1)')
+check("a request arriving the same instant the table lands is still queued", L.execute('return SHOWN_NAMES()') == "1:Ken Lastname", dump(L))
+L = fresh('GUILD=nil'); L.execute('WhoLayerSwapDB={guilds={spanish="quen"}} ADVANCE(2) CLEAR() EV("GUILD_INVITE_REQUEST","M","quen",0,"",false)')
+check("late saved name -> invite from that guild is auto-accepted", L.execute('return has("ACCEPT")'), dump(L))
+L = fresh('GUILD=nil'); L.execute('WhoLayerSwapDB={autoAccept=false} ADVANCE(2) CLEAR() EV("GUILD_INVITE_REQUEST","M","Who",0,"",false)')
+check("late saved auto-accept=off is honoured", not L.execute('return has("ACCEPT")'), dump(L))
+L = fresh(); L.execute('WhoLayerSwapDB={point={"TOPLEFT","TOPLEFT",33,-44}, queuePoint={"BOTTOM","BOTTOM",10,200}, hidden=true} ADVANCE(2)')
+g = L.globals()
+check("late saved panel position / queue position / hidden are applied",
+      list(g.WhoLayerSwapPanel.points.values())[:1] == ["TOPLEFT"] and g.WhoLayerSwapQueue.points[1] == "BOTTOM" and not g.WhoLayerSwapPanel.shown,
+      f"{list(g.WhoLayerSwapPanel.points.values())} {g.WhoLayerSwapQueue.points[1]} shown={g.WhoLayerSwapPanel.shown}")
+L = fresh('GUILD="quen"'); L.execute('INCOMBAT=true WhoLayerSwapDB={guilds={spanish="quen"}, point={"TOPLEFT","TOPLEFT",33,-44}} ADVANCE(3) CLEAR() SLASH("debug") REQ("spanish","Ken Lastname-Dreamscythe")')
+check("late table in combat: no secure-frame error, names still live", L.execute('return said("added to your Invite button")'), dump(L))
+L.execute('INCOMBAT=false EV("PLAYER_REGEN_ENABLED") ADVANCE(2)')
+check("…and the position is applied after combat", list(L.globals().WhoLayerSwapPanel.points.values())[:1] == ["TOPLEFT"], str(list(L.globals().WhoLayerSwapPanel.points.values())))
+L = fresh('GUILD="Who"'); L.execute('WhoLayerSwapDB={guilds={spanish="quen"}} ADVANCE(2) CLEAR() REQ("spanish","Ken Lastname-Dreamscythe") ADVANCE(1)')
+check("late table doesn't make <Who> invite Latam", L.execute('return SHOWN_NAMES()') == "")
+L = fresh(login=False); L.execute('WhoLayerSwapDB={guilds={spanish="quen"}} EV("ADDON_LOADED","WhoLayerSwap") EV("PLAYER_LOGIN") EV("PLAYER_ENTERING_WORLD", true, false) ADVANCE(12) GUILD="quen" CLEAR() REQ("spanish","Ken Lastname-Dreamscythe") ADVANCE(1)')
+check("normal load order (ADDON_LOADED before login) still works", L.execute('return SHOWN_NAMES()') == "1:Ken Lastname", dump(L))
 
 print(f"\n{PASS} passed, {len(FAIL)} failed")
 for f in FAIL: print("FAIL:", f)

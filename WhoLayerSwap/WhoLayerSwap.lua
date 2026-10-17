@@ -29,10 +29,17 @@ local cfg = {
     verbose        = true,      -- print a line when you invite someone
     debug          = false,     -- /wls debug: explain every request seen
 }
--- Saved settings (may come back empty on Forever's beta; always read through DB()).
+-- Saved settings. On Forever's beta the saved table can turn up AFTER PLAYER_LOGIN
+-- (or be filled in later), so nothing may cache what's in it at login: read through
+-- DB() every time, and SyncSaved() re-applies the rest whenever the table changes.
 local function DB()
     if type(WhoLayerSwapDB) ~= "table" then WhoLayerSwapDB = {} end
     return WhoLayerSwapDB
+end
+-- Read-only look at the saved table (never creates it, so the game's own copy can
+-- still land on the global after this file runs).
+local function SavedDB()
+    return type(WhoLayerSwapDB) == "table" and WhoLayerSwapDB or nil
 end
 
 -- Which guilds invite for which language. Every copy knows the built-in names
@@ -53,7 +60,8 @@ end
 
 -- Extra names saved in Settings, comma-separated (guild names can't contain commas).
 local function ExtraNames(lang)
-    local raw = type(DB().guilds) == "table" and DB().guilds[lang]
+    local db = SavedDB()
+    local raw = db and type(db.guilds) == "table" and db.guilds[lang]
     local list = {}
     if type(raw) ~= "string" then return list end
     for part in raw:gmatch("[^,]+") do
@@ -63,8 +71,19 @@ local function ExtraNames(lang)
     return list
 end
 
+-- What the saved extras look like right now, so a change (including a saved table
+-- that arrives late) is noticed before the next lookup.
+local namesSig
+local function NamesSig()
+    local db = SavedDB()
+    local g = db and type(db.guilds) == "table" and db.guilds
+    if not g then return "" end
+    return tostring(g.english or "") .. "|" .. tostring(g.spanish or "") .. "|" .. tostring(g.portuguese or "")
+end
+
 -- Rebuild NAMES / MATCH in place (other code holds these tables).
 local function ApplyGuildNames()
+    namesSig = NamesSig()
     for k in pairs(NAMES) do NAMES[k] = nil end
     for k in pairs(MATCH) do MATCH[k] = nil end
     for _, lang in ipairs(LANGS) do              -- built-ins first, so they always win
@@ -86,12 +105,18 @@ local function ApplyGuildNames()
 end
 ApplyGuildNames()
 
-local function LangOfGuild(guild) return guild and MATCH[GKey(guild)] or nil end
-local function InLangGuild(guild, lang) return guild ~= nil and MATCH[GKey(guild)] == lang end
+-- Every lookup goes through this, so the names in use always match the saved ones.
+local function EnsureNames()
+    if NamesSig() ~= namesSig then ApplyGuildNames() end
+end
+
+local function LangOfGuild(guild) EnsureNames() return guild and MATCH[GKey(guild)] or nil end
+local function InLangGuild(guild, lang) EnsureNames() return guild ~= nil and MATCH[GKey(guild)] == lang end
 local function IsKnownGuild(guild) return LangOfGuild(guild) ~= nil end
 
 -- "<Who>/<Who Two>" for messages.
 local function LabelFor(lang)
+    EnsureNames()
     local parts = {}
     for _, n in ipairs(NAMES[lang] or {}) do parts[#parts + 1] = "<" .. n .. ">" end
     return table.concat(parts, "/")
@@ -977,6 +1002,7 @@ end
 
 -- Save the extra names for a language from a comma-separated string.
 local function SetExtraNames(lang, text)
+    EnsureNames()
     text = type(text) == "string" and text or ""
     if type(DB().guilds) ~= "table" then DB().guilds = {} end
     local keep, skipped = {}, {}
@@ -1176,10 +1202,38 @@ local function RegisterOptionsEntry()
 end
 
 ------------------------------------------------------------------------------
+-- Saved settings that arrive late
+------------------------------------------------------------------------------
+-- Forever's beta can hand the addon its saved table after PLAYER_LOGIN, or fill it in
+-- later. Guild names already read live (EnsureNames); this re-applies everything
+-- else whenever the saved table changes, so it behaves as if it had been there at login.
+local syncedDB, syncedAccept
+local function SyncSaved(why)
+    local db = SavedDB()
+    local accept = db and db.autoAccept
+    if db == syncedDB and accept == syncedAccept then return false end
+    if panel and InCombatLockdown() then return false end   -- secure frames: try again after combat
+    syncedDB, syncedAccept = db, accept
+    if type(accept) == "boolean" then cfg.autoAccept = accept end
+    EnsureNames()
+    if panel then
+        PlacePanel()
+        ApplyQueuePosition()
+        panel:SetShown(not (db and db.hidden))
+        RefreshPanel()
+        UpdateCharterButton()
+    end
+    ApplyChannelVisibility()
+    if RefreshSettings then RefreshSettings() end
+    if db then Debug(("saved settings applied (%s)."):format(why or "changed")) end
+    return true
+end
+
+------------------------------------------------------------------------------
 -- Events
 ------------------------------------------------------------------------------
 local f = CreateFrame("Frame")
-for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_GUILD_UPDATE", "PLAYER_REGEN_ENABLED", "BAG_UPDATE_DELAYED",
+for _, e in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_GUILD_UPDATE", "PLAYER_REGEN_ENABLED", "BAG_UPDATE_DELAYED",
                      "GUILD_INVITE_REQUEST", "ADDON_ACTION_BLOCKED",
                      "CHAT_MSG_CHANNEL", "CHAT_MSG_WHISPER", "CHAT_MSG_ADDON" }) do
     pcall(f.RegisterEvent, f, e)
@@ -1188,13 +1242,17 @@ end
 local joinedOnce = false
 
 f:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        if ... == ADDON then SyncSaved("loaded") end
+        return
+    end
+
     if event == "PLAYER_LOGIN" then
         if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
             C_ChatInfo.RegisterAddonMessagePrefix(COMM)
         end
-        if type(DB().autoAccept) == "boolean" then cfg.autoAccept = DB().autoAccept end
-        ApplyGuildNames()           -- saved names are loaded by now
         BuildPanel()
+        SyncSaved("login")
         pcall(RegisterOptionsEntry)
         lastGuild = false           -- first real reading sets it without a toast
         C_Timer.After(5, function()
@@ -1203,6 +1261,9 @@ f:SetScript("OnEvent", function(self, event, ...)
         -- expire old requests from the button now and then
         local function tick() PruneQueue(); if UpdateQueue then UpdateQueue() end; C_Timer.After(10, tick) end
         C_Timer.After(10, tick)
+        -- and keep watching for saved settings that show up late
+        local function watch() SyncSaved("late") C_Timer.After(1, watch) end
+        C_Timer.After(1, watch)
         return
     end
 
@@ -1221,6 +1282,7 @@ f:SetScript("OnEvent", function(self, event, ...)
             joinedOnce = true
             C_Timer.After(JOIN_DELAY, JoinHiddenChannel)
         end
+        SyncSaved("entering world")
         RefreshPanel()
         UpdateCharterButton()
         return
